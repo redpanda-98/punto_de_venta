@@ -43,36 +43,94 @@ try {
             exit;
         }
 
-        $employeeId = filter_input(INPUT_POST, 'id_empleado', FILTER_VALIDATE_INT);
-        $productId = filter_input(INPUT_POST, 'id_producto', FILTER_VALIDATE_INT);
-        $quantity = filter_input(INPUT_POST, 'cantidad', FILTER_VALIDATE_INT);
-
-        if (!$employeeId || !$productId || !$quantity || $quantity < 1) {
-            $_SESSION['flash'] = ['type' => 'error', 'message' => 'Selecciona un empleado, un producto y una cantidad válida.'];
-            header('Location: index.php');
-            exit;
-        }
-
+        $action = $_POST['action'] ?? '';
         try {
-            $pdo->beginTransaction();
-            $productQuery = $pdo->prepare('SELECT cantidad FROM productos WHERE id_producto = ? FOR UPDATE');
-            $productQuery->execute([$productId]);
-            $product = $productQuery->fetch();
-
-            if (!$product) {
-                throw new DomainException('El producto seleccionado ya no está disponible.');
-            }
-            if ($quantity > (int) $product['cantidad']) {
-                throw new DomainException('No hay existencias suficientes para esa cantidad.');
+            if (!is_string($action)) {
+                throw new DomainException('La operación solicitada no es válida.');
             }
 
-            $saleQuery = $pdo->prepare(
-                'INSERT INTO ventas (id_empleado, id_producto, cantidad, fecha_compra) VALUES (?, ?, ?, CURDATE())'
-            );
-            $saleQuery->execute([$employeeId, $productId, $quantity]);
-            $pdo->commit();
+            if ($action === 'register_sale') {
+                $employeeId = filter_var($_POST['id_empleado'] ?? null, FILTER_VALIDATE_INT);
+                $productId = filter_var($_POST['id_producto'] ?? null, FILTER_VALIDATE_INT);
+                $quantity = filter_var($_POST['cantidad'] ?? null, FILTER_VALIDATE_INT);
 
-            $_SESSION['flash'] = ['type' => 'success', 'message' => 'Venta registrada y existencias actualizadas.'];
+                if (!$employeeId || !$productId || !$quantity || $quantity < 1) {
+                    throw new DomainException('Selecciona un empleado, un producto y una cantidad válida.');
+                }
+
+                $pdo->beginTransaction();
+                $productQuery = $pdo->prepare('SELECT cantidad FROM productos WHERE id_producto = ? FOR UPDATE');
+                $productQuery->execute([$productId]);
+                $product = $productQuery->fetch();
+
+                if (!$product) {
+                    throw new DomainException('El producto seleccionado ya no está disponible.');
+                }
+                if ($quantity > (int) $product['cantidad']) {
+                    throw new DomainException('No hay existencias suficientes para esa cantidad.');
+                }
+
+                $saleQuery = $pdo->prepare(
+                    'INSERT INTO ventas (id_empleado, id_producto, cantidad, fecha_compra) VALUES (?, ?, ?, CURDATE())'
+                );
+                $saleQuery->execute([$employeeId, $productId, $quantity]);
+                $pdo->commit();
+                $message = 'Venta registrada y existencias actualizadas.';
+            } elseif ($action === 'create_product') {
+                $name = $_POST['nombre'] ?? '';
+                $price = $_POST['precio'] ?? '';
+                $quantity = filter_var($_POST['cantidad'] ?? null, FILTER_VALIDATE_INT);
+
+                if (!is_string($name) || !is_string($price)) {
+                    throw new DomainException('Revisa los datos del producto.');
+                }
+
+                $name = trim($name);
+                if ($name === '' || mb_strlen($name, 'UTF-8') > 75) {
+                    throw new DomainException('El nombre debe tener entre 1 y 75 caracteres.');
+                }
+                if (!preg_match('/^\d{1,8}(?:\.\d{1,2})?$/', $price) || (float) $price <= 0) {
+                    throw new DomainException('Escribe un precio mayor que cero con máximo dos decimales.');
+                }
+                if ($quantity === false || $quantity < 0) {
+                    throw new DomainException('El stock inicial debe ser un número entero igual o mayor que cero.');
+                }
+
+                $productQuery = $pdo->prepare('INSERT INTO productos (nombre, precio, cantidad) VALUES (?, ?, ?)');
+                $productQuery->execute([$name, $price, $quantity]);
+                $message = 'Producto agregado al inventario.';
+            } elseif ($action === 'adjust_stock') {
+                $productId = filter_var($_POST['id_producto'] ?? null, FILTER_VALIDATE_INT);
+                $quantity = filter_var($_POST['cantidad'] ?? null, FILTER_VALIDATE_INT);
+                $movement = $_POST['movimiento'] ?? '';
+
+                if (!$productId || !$quantity || $quantity < 1 || !in_array($movement, ['sumar', 'restar'], true)) {
+                    throw new DomainException('Selecciona un ajuste válido de stock.');
+                }
+
+                $pdo->beginTransaction();
+                $productQuery = $pdo->prepare('SELECT cantidad FROM productos WHERE id_producto = ? FOR UPDATE');
+                $productQuery->execute([$productId]);
+                $product = $productQuery->fetch();
+
+                if (!$product) {
+                    throw new DomainException('El producto ya no está disponible.');
+                }
+                $currentStock = (int) $product['cantidad'];
+                if ($movement === 'restar' && $quantity > $currentStock) {
+                    throw new DomainException('No puedes retirar más unidades de las que hay en existencia.');
+                }
+
+                $newStock = $movement === 'sumar' ? $currentStock + $quantity : $currentStock - $quantity;
+                $updateQuery = $pdo->prepare('UPDATE productos SET cantidad = ? WHERE id_producto = ?');
+                $updateQuery->execute([$newStock, $productId]);
+                $pdo->commit();
+                $message = $movement === 'sumar' ? 'Stock aumentado correctamente.' : 'Stock disminuido correctamente.';
+            } else {
+                throw new DomainException('La operación solicitada no es válida.');
+            }
+
+            $_SESSION['flash'] = ['type' => 'success', 'message' => $message];
         } catch (DomainException $exception) {
             if ($pdo->inTransaction()) {
                 $pdo->rollBack();
@@ -82,7 +140,7 @@ try {
             if ($pdo->inTransaction()) {
                 $pdo->rollBack();
             }
-            $_SESSION['flash'] = ['type' => 'error', 'message' => 'No se pudo registrar la venta. Verifica los datos e inténtalo de nuevo.'];
+            $_SESSION['flash'] = ['type' => 'error', 'message' => 'No se pudo guardar el cambio. Verifica los datos e inténtalo de nuevo.'];
         }
 
         header('Location: index.php');
@@ -136,8 +194,8 @@ try {
         <section class="page-heading" aria-labelledby="page-title">
             <div>
                 <p class="eyebrow">OPERACIÓN DIARIA <span></span> <?= escape(date('d / m / Y')) ?></p>
-                <h1 id="page-title">Ventas</h1>
-                <p class="heading-copy">Registra una venta y mantén el inventario al día.</p>
+                <h1 id="page-title">Ventas e inventario</h1>
+                <p class="heading-copy">Registra ventas y administra las existencias de tu ferretería.</p>
             </div>
             <div class="heading-stamp" aria-hidden="true">
                 <span>F</span>
@@ -185,6 +243,7 @@ try {
                     <?php else: ?>
                         <form method="post" class="sale-form">
                             <input type="hidden" name="csrf_token" value="<?= escape($_SESSION['csrf_token']) ?>">
+                            <input type="hidden" name="action" value="register_sale">
                             <label for="id_empleado">Atendido por</label>
                             <select id="id_empleado" name="id_empleado" required>
                                 <option value="">Selecciona un empleado</option>
@@ -259,6 +318,82 @@ try {
                     <div class="history-footer">Mostrando <?= count($recentSales) ?> de las ventas más recientes</div>
                 </section>
             </div>
+
+            <section class="inventory-section" id="inventario" aria-labelledby="inventory-title">
+                <div class="inventory-heading">
+                    <div>
+                        <p class="eyebrow">CATÁLOGO Y EXISTENCIAS</p>
+                        <h2 id="inventory-title">Control de stock</h2>
+                    </div>
+                    <span class="panel-index"><?= count($products) ?> PRODUCTOS</span>
+                </div>
+
+                <div class="inventory-grid">
+                    <section class="inventory-list-panel" aria-label="Productos y existencias">
+                        <?php if (!$products): ?>
+                            <p class="empty-state">Aún no hay productos. Agrega el primero con el formulario.</p>
+                        <?php else: ?>
+                            <div class="table-wrap">
+                                <table class="inventory-table">
+                                    <thead>
+                                        <tr>
+                                            <th>PRODUCTO</th>
+                                            <th>PRECIO</th>
+                                            <th>EXISTENCIAS</th>
+                                            <th>AJUSTAR STOCK</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <?php foreach ($products as $product): ?>
+                                            <tr>
+                                                <td><strong><?= escape($product['nombre'] ?? 'Sin nombre') ?></strong></td>
+                                                <td>$<?= number_format((float) $product['precio'], 2) ?></td>
+                                                <td><span class="stock-count"><?= number_format((int) $product['cantidad']) ?></span> unidades</td>
+                                                <td>
+                                                    <form method="post" class="stock-form">
+                                                        <input type="hidden" name="csrf_token" value="<?= escape($_SESSION['csrf_token']) ?>">
+                                                        <input type="hidden" name="action" value="adjust_stock">
+                                                        <input type="hidden" name="id_producto" value="<?= (int) $product['id_producto'] ?>">
+                                                        <label class="visually-hidden" for="stock-<?= (int) $product['id_producto'] ?>">Cantidad a ajustar de <?= escape($product['nombre'] ?? 'producto') ?></label>
+                                                        <input id="stock-<?= (int) $product['id_producto'] ?>" type="number" name="cantidad" min="1" step="1" value="1" inputmode="numeric" required>
+                                                        <button class="stock-button add-stock" type="submit" name="movimiento" value="sumar">+ Sumar</button>
+                                                        <button class="stock-button remove-stock" type="submit" name="movimiento" value="restar">− Restar</button>
+                                                    </form>
+                                                </td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                    </tbody>
+                                </table>
+                            </div>
+                        <?php endif; ?>
+                    </section>
+
+                    <section class="new-product-panel" aria-labelledby="new-product-title">
+                        <div class="section-heading">
+                            <div>
+                                <p class="eyebrow">AMPLÍA TU CATÁLOGO</p>
+                                <h2 id="new-product-title">Nuevo producto</h2>
+                            </div>
+                            <span class="panel-index">+</span>
+                        </div>
+                        <form method="post" class="new-product-form">
+                            <input type="hidden" name="csrf_token" value="<?= escape($_SESSION['csrf_token']) ?>">
+                            <input type="hidden" name="action" value="create_product">
+                            <label for="nuevo-nombre">Nombre del producto</label>
+                            <input id="nuevo-nombre" name="nombre" type="text" maxlength="75" autocomplete="off" required>
+                            <label for="nuevo-precio">Precio</label>
+                            <div class="price-input"><span>$</span><input id="nuevo-precio" name="precio" type="number" min="0.01" max="99999999.99" step="0.01" placeholder="0.00" required></div>
+                            <label for="nuevo-stock">Stock inicial</label>
+                            <input id="nuevo-stock" name="cantidad" type="number" min="0" step="1" value="0" inputmode="numeric" required>
+                            <button class="submit-button" type="submit">
+                                <span>Agregar producto</span>
+                                <span class="button-arrow" aria-hidden="true">&#8594;</span>
+                            </button>
+                        </form>
+                        <div class="panel-footnote">Los ajustes de stock no generan una venta.</div>
+                    </section>
+                </div>
+            </section>
         <?php endif; ?>
     </main>
 

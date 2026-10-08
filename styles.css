@@ -107,6 +107,35 @@ td strong { display: block; color: var(--ink); font-size: 11px; font-weight: 600
 .align-right { text-align: right; }
 td.amount { color: var(--green-dark); font-weight: 700; }
 .history-footer { padding: 13px 0 15px; color: var(--muted); font-size: 10px; }
+.inventory-section { margin-top: 34px; }
+.inventory-heading { display: flex; justify-content: space-between; align-items: end; margin-bottom: 14px; }
+.inventory-heading .eyebrow { margin-bottom: 6px; }
+.inventory-heading .panel-index { padding-bottom: 3px; font-family: 'DM Sans', sans-serif; font-size: 9px; font-weight: 700; letter-spacing: .7px; }
+.inventory-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(260px, .72fr); gap: 20px; align-items: start; }
+.inventory-list-panel, .new-product-panel { min-width: 0; border: 1px solid var(--line); background: var(--white); }
+.inventory-list-panel { padding: 8px 16px 0; }
+.new-product-panel { padding: 22px 24px 17px; }
+.inventory-table { min-width: 620px; }
+.inventory-table th, .inventory-table td { padding-right: 10px; padding-left: 10px; }
+.inventory-table td { height: 62px; }
+.inventory-table td strong { font-size: 12px; }
+.stock-count { color: var(--ink); font-weight: 700; }
+.stock-form { display: flex; align-items: center; gap: 6px; }
+.stock-form input { width: 58px; height: 32px; padding: 0 6px; border: 1px solid #cfd8d3; border-radius: 2px; color: var(--ink); font: inherit; font-size: 11px; }
+.stock-button { min-height: 32px; padding: 0 8px; border: 1px solid; border-radius: 2px; background: #fff; font: inherit; font-size: 10px; font-weight: 700; cursor: pointer; }
+.add-stock { border-color: #b5d3c6; color: var(--green-dark); }
+.add-stock:hover { background: #eef6f1; }
+.remove-stock { border-color: #e1c5bf; color: var(--red); }
+.remove-stock:hover { background: #fbf1ef; }
+.new-product-form { display: flex; flex-direction: column; }
+.new-product-form label { margin: 0 0 7px; font-size: 11px; font-weight: 600; }
+.new-product-form > input, .price-input { width: 100%; height: 40px; margin-bottom: 15px; border: 1px solid #cfd8d3; border-radius: 2px; background: #fff; color: var(--ink); font: inherit; }
+.new-product-form > input { padding: 0 10px; }
+.price-input { display: flex; align-items: center; gap: 8px; padding-left: 10px; }
+.price-input span { color: var(--muted); }
+.price-input input { width: 100%; height: 100%; border: 0; outline: none; background: transparent; color: var(--ink); font: inherit; }
+.new-product-form input:focus, .stock-form input:focus, .price-input:focus-within { border-color: var(--green); outline: none; box-shadow: 0 0 0 3px rgb(36 115 94 / 12%); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; clip-path: inset(50%); }
 .site-footer { width: min(1216px, calc(100% - 64px)); display: flex; justify-content: space-between; gap: 16px; margin: 36px auto 0; padding: 16px 0 22px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; }
 .site-footer span:first-child { font-weight: 700; letter-spacing: .7px; }
 
@@ -115,6 +144,8 @@ td.amount { color: var(--green-dark); font-weight: 700; }
     .page-shell, .site-footer { width: calc(100% - 40px); }
     .page-heading { min-height: 145px; }
     .workspace-grid { grid-template-columns: 1fr; }
+    .inventory-grid { grid-template-columns: 1fr; }
+    .inventory-list-panel { padding-right: 8px; padding-left: 8px; }
     .sale-panel { min-height: 400px; }
     .history-panel { padding-right: 15px; padding-left: 15px; }
     .history-panel th, .history-panel td { padding-right: 7px; padding-left: 7px; }
