@@ -15,6 +15,26 @@ function escape(string $value): string
     return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
 }
 
+function employeeFields(): array
+{
+    $name = $_POST['nombre'] ?? '';
+    $phone = $_POST['telefono'] ?? '';
+
+    if (!is_string($name) || !is_string($phone)) {
+        throw new DomainException('Revisa los datos del empleado.');
+    }
+
+    $name = trim($name);
+    if ($name === '' || mb_strlen($name, 'UTF-8') > 75) {
+        throw new DomainException('El nombre debe tener entre 1 y 75 caracteres.');
+    }
+    if (!preg_match('/^\d{0,10}$/', $phone)) {
+        throw new DomainException('El teléfono debe contener solo números y hasta 10 dígitos.');
+    }
+
+    return [$name, $phone === '' ? null : $phone];
+}
+
 $connectionError = null;
 $products = [];
 $employees = [];
@@ -126,6 +146,50 @@ try {
                 $updateQuery->execute([$newStock, $productId]);
                 $pdo->commit();
                 $message = $movement === 'sumar' ? 'Stock aumentado correctamente.' : 'Stock disminuido correctamente.';
+            } elseif ($action === 'create_employee') {
+                [$name, $phone] = employeeFields();
+                $employeeQuery = $pdo->prepare('INSERT INTO empleados (nombre, telefono) VALUES (?, ?)');
+                $employeeQuery->execute([$name, $phone]);
+                $message = 'Empleado agregado correctamente.';
+            } elseif ($action === 'update_employee') {
+                $employeeId = filter_var($_POST['id_empleado'] ?? null, FILTER_VALIDATE_INT);
+                if (!$employeeId) {
+                    throw new DomainException('Selecciona un empleado válido.');
+                }
+                [$name, $phone] = employeeFields();
+
+                $pdo->beginTransaction();
+                $employeeQuery = $pdo->prepare('SELECT id_empleado FROM empleados WHERE id_empleado = ? FOR UPDATE');
+                $employeeQuery->execute([$employeeId]);
+                if (!$employeeQuery->fetch()) {
+                    throw new DomainException('El empleado ya no está disponible.');
+                }
+                $updateQuery = $pdo->prepare('UPDATE empleados SET nombre = ?, telefono = ? WHERE id_empleado = ?');
+                $updateQuery->execute([$name, $phone, $employeeId]);
+                $pdo->commit();
+                $message = 'Datos del empleado actualizados.';
+            } elseif ($action === 'delete_employee') {
+                $employeeId = filter_var($_POST['id_empleado'] ?? null, FILTER_VALIDATE_INT);
+                if (!$employeeId) {
+                    throw new DomainException('Selecciona un empleado válido.');
+                }
+
+                $pdo->beginTransaction();
+                $employeeQuery = $pdo->prepare('SELECT id_empleado FROM empleados WHERE id_empleado = ? FOR UPDATE');
+                $employeeQuery->execute([$employeeId]);
+                if (!$employeeQuery->fetch()) {
+                    throw new DomainException('El empleado ya no está disponible.');
+                }
+                $salesQuery = $pdo->prepare('SELECT COUNT(*) FROM ventas WHERE id_empleado = ?');
+                $salesQuery->execute([$employeeId]);
+                if ((int) $salesQuery->fetchColumn() > 0) {
+                    throw new DomainException('No se puede eliminar un empleado con ventas registradas.');
+                }
+
+                $deleteQuery = $pdo->prepare('DELETE FROM empleados WHERE id_empleado = ?');
+                $deleteQuery->execute([$employeeId]);
+                $pdo->commit();
+                $message = 'Empleado eliminado correctamente.';
             } else {
                 throw new DomainException('La operación solicitada no es válida.');
             }
@@ -148,7 +212,13 @@ try {
     }
 
     $products = $pdo->query('SELECT id_producto, nombre, precio, cantidad FROM productos ORDER BY nombre')->fetchAll();
-    $employees = $pdo->query('SELECT id_empleado, nombre FROM empleados ORDER BY nombre')->fetchAll();
+    $employees = $pdo->query(
+        'SELECT e.id_empleado, e.nombre, e.telefono, e.ventas_mensuales, COUNT(v.id_venta) AS cantidad_ventas
+         FROM empleados e
+         LEFT JOIN ventas v ON v.id_empleado = e.id_empleado
+         GROUP BY e.id_empleado, e.nombre, e.telefono, e.ventas_mensuales
+         ORDER BY e.nombre'
+    )->fetchAll();
     $recentSales = $pdo->query(
         'SELECT v.id_venta, v.fecha_compra, v.cantidad, v.total, p.nombre AS producto, e.nombre AS empleado
          FROM ventas v
@@ -187,6 +257,17 @@ try {
             <span class="brand-mark" aria-hidden="true">F</span>
             <span class="brand-name">Ferretería</span>
         </a>
+        <?php if (!$connectionError): ?>
+            <nav class="site-nav" aria-label="Secciones de la página">
+                <div class="site-nav-inner">
+                    <a href="#resumen">Resumen</a>
+                    <a href="#venta">Registrar venta</a>
+                    <a href="#historial">Últimas ventas</a>
+                    <a href="#inventario">Inventario</a>
+                    <a href="#empleados">Empleados</a>
+                </div>
+            </nav>
+        <?php endif; ?>
         <span class="topbar-label"><span class="status-dot"></span> Punto de venta</span>
     </header>
 
@@ -210,7 +291,7 @@ try {
         <?php endif; ?>
 
         <?php if (!$connectionError): ?>
-            <section class="metrics" aria-label="Resumen del día">
+            <section class="metrics" id="resumen" aria-label="Resumen del día">
                 <article class="metric metric-accent">
                     <span class="metric-label">VENTAS DE HOY</span>
                     <strong>$<?= number_format($todaySales, 2) ?></strong>
@@ -229,7 +310,7 @@ try {
             </section>
 
             <div class="workspace-grid">
-                <section class="sale-panel" aria-labelledby="sale-title">
+                <section class="sale-panel" id="venta" aria-labelledby="sale-title">
                     <div class="section-heading">
                         <div>
                             <p class="eyebrow">NUEVO MOVIMIENTO</p>
@@ -277,7 +358,7 @@ try {
                     <div class="panel-footnote"><span class="status-dot"></span> La existencia se descuenta al confirmar.</div>
                 </section>
 
-                <section class="history-panel" aria-labelledby="history-title">
+                <section class="history-panel" id="historial" aria-labelledby="history-title">
                     <div class="section-heading history-heading">
                         <div>
                             <p class="eyebrow">ACTIVIDAD RECIENTE</p>
@@ -391,6 +472,96 @@ try {
                             </button>
                         </form>
                         <div class="panel-footnote">Los ajustes de stock no generan una venta.</div>
+                    </section>
+                </div>
+            </section>
+
+            <section class="employee-section" id="empleados" aria-labelledby="employee-title">
+                <div class="inventory-heading">
+                    <div>
+                        <p class="eyebrow">EQUIPO DE TRABAJO</p>
+                        <h2 id="employee-title">Administrar empleados</h2>
+                    </div>
+                    <span class="panel-index"><?= count($employees) ?> EMPLEADOS</span>
+                </div>
+
+                <div class="employee-grid">
+                    <section class="employee-list-panel" aria-label="Empleados registrados">
+                        <?php if (!$employees): ?>
+                            <p class="empty-state">Aún no hay empleados. Agrega el primero con el formulario.</p>
+                        <?php else: ?>
+                            <div class="table-wrap">
+                                <table class="employee-table">
+                                    <thead>
+                                        <tr>
+                                            <th>DATOS DEL EMPLEADO</th>
+                                            <th>VENTAS DEL MES</th>
+                                            <th>ELIMINAR</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <?php foreach ($employees as $employee): ?>
+                                            <tr>
+                                                <td>
+                                                    <form method="post" class="employee-edit-form">
+                                                        <input type="hidden" name="csrf_token" value="<?= escape($_SESSION['csrf_token']) ?>">
+                                                        <input type="hidden" name="action" value="update_employee">
+                                                        <input type="hidden" name="id_empleado" value="<?= (int) $employee['id_empleado'] ?>">
+                                                        <label>
+                                                            <span>Nombre</span>
+                                                            <input type="text" name="nombre" maxlength="75" value="<?= escape($employee['nombre'] ?? '') ?>" required>
+                                                        </label>
+                                                        <label>
+                                                            <span>Teléfono</span>
+                                                            <input type="tel" name="telefono" maxlength="10" pattern="[0-9]{0,10}" inputmode="numeric" value="<?= escape((string) ($employee['telefono'] ?? '')) ?>">
+                                                        </label>
+                                                        <button class="employee-save-button" type="submit">Guardar</button>
+                                                    </form>
+                                                </td>
+                                                <td>
+                                                    <strong class="employee-sales">$<?= number_format((float) $employee['ventas_mensuales'], 2) ?></strong>
+                                                    <span class="row-subtitle"><?= (int) $employee['cantidad_ventas'] ?> ventas registradas</span>
+                                                </td>
+                                                <td>
+                                                    <form method="post" class="employee-delete-form">
+                                                        <input type="hidden" name="csrf_token" value="<?= escape($_SESSION['csrf_token']) ?>">
+                                                        <input type="hidden" name="action" value="delete_employee">
+                                                        <input type="hidden" name="id_empleado" value="<?= (int) $employee['id_empleado'] ?>">
+                                                        <button class="employee-delete-button" type="submit" <?= (int) $employee['cantidad_ventas'] > 0 ? 'disabled' : '' ?>>Eliminar</button>
+                                                        <?php if ((int) $employee['cantidad_ventas'] > 0): ?>
+                                                            <span class="employee-lock-note">Tiene ventas</span>
+                                                        <?php endif; ?>
+                                                    </form>
+                                                </td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                    </tbody>
+                                </table>
+                            </div>
+                        <?php endif; ?>
+                    </section>
+
+                    <section class="new-employee-panel" aria-labelledby="new-employee-title">
+                        <div class="section-heading">
+                            <div>
+                                <p class="eyebrow">INCORPORA PERSONAL</p>
+                                <h2 id="new-employee-title">Nuevo empleado</h2>
+                            </div>
+                            <span class="panel-index">+</span>
+                        </div>
+                        <form method="post" class="new-employee-form">
+                            <input type="hidden" name="csrf_token" value="<?= escape($_SESSION['csrf_token']) ?>">
+                            <input type="hidden" name="action" value="create_employee">
+                            <label for="nuevo-empleado-nombre">Nombre completo</label>
+                            <input id="nuevo-empleado-nombre" type="text" name="nombre" maxlength="75" autocomplete="name" required>
+                            <label for="nuevo-empleado-telefono">Teléfono</label>
+                            <input id="nuevo-empleado-telefono" type="tel" name="telefono" maxlength="10" pattern="[0-9]{0,10}" inputmode="numeric" autocomplete="tel">
+                            <button class="submit-button" type="submit">
+                                <span>Agregar empleado</span>
+                                <span class="button-arrow" aria-hidden="true">&#8594;</span>
+                            </button>
+                        </form>
+                        <div class="panel-footnote">Las ventas mensuales se calculan automáticamente.</div>
                     </section>
                 </div>
             </section>
