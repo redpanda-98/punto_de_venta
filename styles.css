@@ -220,6 +220,11 @@ td strong { display: block; color: var(--ink); font-size: 11px; font-weight: 600
 .align-right { text-align: right; }
 td.amount { color: var(--green-dark); font-weight: 700; }
 .history-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 0 15px; color: var(--muted); font-size: 10px; }
+.sales-pagination { display: flex; align-items: center; gap: 12px; }
+.sales-pagination a { color: var(--green-dark); font-weight: 700; text-decoration: none; }
+.sales-pagination a:hover { text-decoration: underline; }
+.pagination-current { color: var(--ink); white-space: nowrap; }
+.pagination-disabled { color: var(--color4); }
 .inventory-section { margin-top: 34px; }
 .employee-section { margin-top: 34px; }
 .inventory-heading { display: flex; justify-content: space-between; align-items: end; margin-bottom: 14px; }

@@ -44,6 +44,13 @@ $todaySales = 0.0;
 $todayCount = 0;
 $stockUnits = 0;
 $monthlyLeader = null;
+$salesPageSize = 10;
+$requestedSalesPage = filter_var($_GET['ventas_pagina'] ?? 1, FILTER_VALIDATE_INT);
+$salesPage = max(1, $requestedSalesPage === false ? 1 : $requestedSalesPage);
+$salesPageCount = 1;
+$salesTotalCount = 0;
+$salesFirstItem = 0;
+$salesLastItem = 0;
 
 try {
     $pdo = new PDO(
@@ -316,7 +323,17 @@ try {
          ORDER BY e.nombre'
     )->fetchAll();
     $pdo->exec('SET SESSION group_concat_max_len = 8192');
-    $recentSales = $pdo->query(
+    $salesTotalCount = (int) $pdo->query(
+        'SELECT COUNT(*) FROM (
+            SELECT COALESCE(folio_venta, CONCAT("legacy-", id_venta)) AS grupo
+            FROM ventas
+            GROUP BY grupo
+        ) AS ventas_agrupadas'
+    )->fetchColumn();
+    $salesPageCount = max(1, (int) ceil($salesTotalCount / $salesPageSize));
+    $salesPage = min($salesPage, $salesPageCount);
+    $salesOffset = ($salesPage - 1) * $salesPageSize;
+    $recentSalesQuery = $pdo->prepare(
         'SELECT MAX(v.id_venta) AS id_venta, MAX(v.folio_venta) AS folio_venta,
                 v.fecha_compra, e.nombre AS empleado,
             GROUP_CONCAT(p.nombre ORDER BY v.id_venta SEPARATOR 0x0A) AS productos,
@@ -326,8 +343,17 @@ try {
          INNER JOIN productos p ON p.id_producto = v.id_producto
          INNER JOIN empleados e ON e.id_empleado = v.id_empleado
          GROUP BY COALESCE(v.folio_venta, CONCAT("legacy-", v.id_venta)), v.id_empleado, v.fecha_compra, e.nombre
-            ORDER BY MAX(v.id_venta) DESC'
-        )->fetchAll();
+         ORDER BY MAX(v.id_venta) DESC
+         LIMIT :page_size OFFSET :page_offset'
+    );
+    $recentSalesQuery->bindValue(':page_size', $salesPageSize, PDO::PARAM_INT);
+    $recentSalesQuery->bindValue(':page_offset', $salesOffset, PDO::PARAM_INT);
+    $recentSalesQuery->execute();
+    $recentSales = $recentSalesQuery->fetchAll();
+    if ($recentSales) {
+        $salesFirstItem = $salesOffset + 1;
+        $salesLastItem = $salesOffset + count($recentSales);
+    }
 
     $summary = $pdo->query(
         'SELECT
@@ -510,7 +536,7 @@ try {
                             <p class="eyebrow">ACTIVIDAD RECIENTE</p>
                             <h2 id="history-title">Últimas ventas</h2>
                         </div>
-                        <span class="panel-index"><?= count($recentSales) ?> VENTAS</span>
+                        <span class="panel-index"><?= $salesTotalCount ?> VENTAS</span>
                     </div>
 
                     <?php if (!$recentSales): ?>
@@ -547,7 +573,24 @@ try {
                             </table>
                         </div>
                     <?php endif; ?>
-                    <div class="history-footer"><?= count($recentSales) ?> ventas en total</div>
+                    <div class="history-footer">
+                        <span>Mostrando <?= $salesFirstItem ?>–<?= $salesLastItem ?> de <?= $salesTotalCount ?> ventas</span>
+                        <?php if ($salesPageCount > 1): ?>
+                            <nav class="sales-pagination" aria-label="Paginación de ventas">
+                                <?php if ($salesPage > 1): ?>
+                                    <a href="?ventas_pagina=<?= $salesPage - 1 ?>#historial" aria-label="Página anterior">Anterior</a>
+                                <?php else: ?>
+                                    <span class="pagination-disabled">Anterior</span>
+                                <?php endif; ?>
+                                <span class="pagination-current">Página <?= $salesPage ?> de <?= $salesPageCount ?></span>
+                                <?php if ($salesPage < $salesPageCount): ?>
+                                    <a href="?ventas_pagina=<?= $salesPage + 1 ?>#historial" aria-label="Página siguiente">Siguiente</a>
+                                <?php else: ?>
+                                    <span class="pagination-disabled">Siguiente</span>
+                                <?php endif; ?>
+                            </nav>
+                        <?php endif; ?>
+                    </div>
                 </section>
             </div>
 
