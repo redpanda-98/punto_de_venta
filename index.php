@@ -37,11 +37,13 @@ function employeeFields(): array
 
 $connectionError = null;
 $products = [];
+$availableProducts = [];
 $employees = [];
 $recentSales = [];
 $todaySales = 0.0;
 $todayCount = 0;
 $stockUnits = 0;
+$monthlyLeader = null;
 
 try {
     $pdo = new PDO(
@@ -71,31 +73,66 @@ try {
 
             if ($action === 'register_sale') {
                 $employeeId = filter_var($_POST['id_empleado'] ?? null, FILTER_VALIDATE_INT);
-                $productId = filter_var($_POST['id_producto'] ?? null, FILTER_VALIDATE_INT);
-                $quantity = filter_var($_POST['cantidad'] ?? null, FILTER_VALIDATE_INT);
-
-                if (!$employeeId || !$productId || !$quantity || $quantity < 1) {
-                    throw new DomainException('Selecciona un empleado, un producto y una cantidad válida.');
+                $submittedItems = $_POST['items'] ?? null;
+                if ($submittedItems === null) {
+                    $submittedItems = [[
+                        'id_producto' => $_POST['id_producto'] ?? null,
+                        'cantidad' => $_POST['cantidad'] ?? null,
+                    ]];
                 }
+                if (!$employeeId || !is_array($submittedItems) || count($submittedItems) < 1 || count($submittedItems) > 10) {
+                    throw new DomainException('Selecciona un empleado y agrega entre 1 y 10 productos.');
+                }
+
+                $cart = [];
+                foreach ($submittedItems as $item) {
+                    if (!is_array($item)) {
+                        throw new DomainException('Revisa los productos de la venta.');
+                    }
+                    $productId = filter_var($item['id_producto'] ?? null, FILTER_VALIDATE_INT);
+                    $quantity = filter_var($item['cantidad'] ?? null, FILTER_VALIDATE_INT);
+                    if (!$productId || !$quantity || $quantity < 1) {
+                        throw new DomainException('Cada producto necesita una cantidad válida.');
+                    }
+                    $currentQuantity = $cart[$productId] ?? 0;
+                    if ($quantity > 2147483647 - $currentQuantity) {
+                        throw new DomainException('La cantidad solicitada excede el límite permitido.');
+                    }
+                    $cart[$productId] = $currentQuantity + $quantity;
+                }
+                if (count($cart) > 10) {
+                    throw new DomainException('Una venta admite hasta 10 productos diferentes.');
+                }
+                ksort($cart, SORT_NUMERIC);
 
                 $pdo->beginTransaction();
-                $productQuery = $pdo->prepare('SELECT cantidad FROM productos WHERE id_producto = ? FOR UPDATE');
-                $productQuery->execute([$productId]);
-                $product = $productQuery->fetch();
-
-                if (!$product) {
-                    throw new DomainException('El producto seleccionado ya no está disponible.');
+                $employeeQuery = $pdo->prepare('SELECT id_empleado FROM empleados WHERE id_empleado = ? FOR UPDATE');
+                $employeeQuery->execute([$employeeId]);
+                if (!$employeeQuery->fetch()) {
+                    throw new DomainException('El empleado seleccionado ya no está disponible.');
                 }
-                if ($quantity > (int) $product['cantidad']) {
-                    throw new DomainException('No hay existencias suficientes para esa cantidad.');
+
+                $productQuery = $pdo->prepare('SELECT nombre, cantidad FROM productos WHERE id_producto = ? FOR UPDATE');
+                foreach ($cart as $productId => $quantity) {
+                    $productQuery->execute([$productId]);
+                    $product = $productQuery->fetch();
+                    if (!$product) {
+                        throw new DomainException('Uno de los productos ya no está disponible.');
+                    }
+                    if ($quantity > (int) $product['cantidad']) {
+                        throw new DomainException('Existencias insuficientes para ' . $product['nombre'] . '.');
+                    }
                 }
 
                 $saleQuery = $pdo->prepare(
-                    'INSERT INTO ventas (id_empleado, id_producto, cantidad, fecha_compra) VALUES (?, ?, ?, CURDATE())'
+                    'INSERT INTO ventas (folio_venta, id_empleado, id_producto, cantidad, fecha_compra) VALUES (?, ?, ?, ?, CURDATE())'
                 );
-                $saleQuery->execute([$employeeId, $productId, $quantity]);
+                $saleFolio = bin2hex(random_bytes(16));
+                foreach ($cart as $productId => $quantity) {
+                    $saleQuery->execute([$saleFolio, $employeeId, $productId, $quantity]);
+                }
                 $pdo->commit();
-                $message = 'Venta registrada y existencias actualizadas.';
+                $message = 'Venta registrada con ' . count($cart) . ' productos. Folio ' . strtoupper(substr($saleFolio, 0, 8)) . '.';
             } elseif ($action === 'create_product') {
                 $name = $_POST['nombre'] ?? '';
                 $price = $_POST['precio'] ?? '';
@@ -146,6 +183,28 @@ try {
                 $updateQuery->execute([$newStock, $productId]);
                 $pdo->commit();
                 $message = $movement === 'sumar' ? 'Stock aumentado correctamente.' : 'Stock disminuido correctamente.';
+            } elseif ($action === 'delete_product') {
+                $productId = filter_var($_POST['id_producto'] ?? null, FILTER_VALIDATE_INT);
+                if (!$productId) {
+                    throw new DomainException('Selecciona un producto válido.');
+                }
+
+                $pdo->beginTransaction();
+                $productQuery = $pdo->prepare('SELECT id_producto FROM productos WHERE id_producto = ? FOR UPDATE');
+                $productQuery->execute([$productId]);
+                if (!$productQuery->fetch()) {
+                    throw new DomainException('El producto ya no está disponible.');
+                }
+                $salesQuery = $pdo->prepare('SELECT COUNT(*) FROM ventas WHERE id_producto = ?');
+                $salesQuery->execute([$productId]);
+                if ((int) $salesQuery->fetchColumn() > 0) {
+                    throw new DomainException('No se puede eliminar un producto con ventas registradas. Se conservó su historial.');
+                }
+
+                $deleteQuery = $pdo->prepare('DELETE FROM productos WHERE id_producto = ?');
+                $deleteQuery->execute([$productId]);
+                $pdo->commit();
+                $message = 'Producto eliminado correctamente.';
             } elseif ($action === 'create_employee') {
                 [$name, $phone] = employeeFields();
                 $employeeQuery = $pdo->prepare('INSERT INTO empleados (nombre, telefono) VALUES (?, ?)');
@@ -211,7 +270,26 @@ try {
         exit;
     }
 
-    $products = $pdo->query('SELECT id_producto, nombre, precio, cantidad FROM productos ORDER BY nombre')->fetchAll();
+    $products = $pdo->query(
+        'SELECT p.id_producto, p.nombre, p.precio, p.cantidad, COUNT(v.id_venta) AS cantidad_ventas
+         FROM productos p
+         LEFT JOIN ventas v ON v.id_producto = p.id_producto
+         GROUP BY p.id_producto, p.nombre, p.precio, p.cantidad
+         ORDER BY p.nombre'
+    )->fetchAll();
+    $availableProducts = array_values(array_map(
+        static function (array $product): array {
+            return [
+                'id' => (int) $product['id_producto'],
+                'nombre' => (string) ($product['nombre'] ?? 'Sin nombre'),
+                'precio' => (float) $product['precio'],
+                'stock' => (int) $product['cantidad'],
+            ];
+        },
+        array_filter($products, static function (array $product): bool {
+            return (int) $product['cantidad'] > 0;
+        })
+    ));
     $employees = $pdo->query(
         'SELECT e.id_empleado, e.nombre, e.telefono, e.ventas_mensuales, COUNT(v.id_venta) AS cantidad_ventas
          FROM empleados e
@@ -219,24 +297,42 @@ try {
          GROUP BY e.id_empleado, e.nombre, e.telefono, e.ventas_mensuales
          ORDER BY e.nombre'
     )->fetchAll();
+    $pdo->exec('SET SESSION group_concat_max_len = 8192');
     $recentSales = $pdo->query(
-        'SELECT v.id_venta, v.fecha_compra, v.cantidad, v.total, p.nombre AS producto, e.nombre AS empleado
+        'SELECT MAX(v.id_venta) AS id_venta, MAX(v.folio_venta) AS folio_venta,
+                v.fecha_compra, e.nombre AS empleado,
+                GROUP_CONCAT(CONCAT(p.nombre, " x", v.cantidad) ORDER BY v.id_venta SEPARATOR ", ") AS productos,
+                COUNT(v.id_venta) AS lineas, SUM(v.total) AS total
          FROM ventas v
          INNER JOIN productos p ON p.id_producto = v.id_producto
          INNER JOIN empleados e ON e.id_empleado = v.id_empleado
-         ORDER BY v.id_venta DESC
+         GROUP BY COALESCE(v.folio_venta, CONCAT("legacy-", v.id_venta)), v.id_empleado, v.fecha_compra, e.nombre
+         ORDER BY MAX(v.id_venta) DESC
          LIMIT 8'
     )->fetchAll();
 
     $summary = $pdo->query(
         'SELECT
             COALESCE(SUM(CASE WHEN fecha_compra = CURDATE() THEN total ELSE 0 END), 0) AS ventas_hoy,
-            COALESCE(SUM(CASE WHEN fecha_compra = CURDATE() THEN 1 ELSE 0 END), 0) AS cantidad_ventas
+            COUNT(DISTINCT CASE WHEN fecha_compra = CURDATE() THEN COALESCE(folio_venta, CONCAT("legacy-", id_venta)) END) AS cantidad_ventas
          FROM ventas'
     )->fetch();
     $todaySales = (float) $summary['ventas_hoy'];
     $todayCount = (int) $summary['cantidad_ventas'];
     $stockUnits = (int) $pdo->query('SELECT COALESCE(SUM(cantidad), 0) FROM productos')->fetchColumn();
+    $monthlyLeader = $pdo->query(
+        "SELECT e.nombre, COALESCE(SUM(v.total), 0) AS total_mes
+         FROM empleados e
+         LEFT JOIN ventas v ON v.id_empleado = e.id_empleado
+            AND v.fecha_compra >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
+            AND v.fecha_compra < DATE_ADD(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL 1 MONTH)
+         GROUP BY e.id_empleado, e.nombre
+         ORDER BY total_mes DESC, e.nombre ASC
+         LIMIT 1"
+    )->fetch();
+    if (!$monthlyLeader || (float) $monthlyLeader['total_mes'] <= 0) {
+        $monthlyLeader = null;
+    }
 } catch (Throwable $exception) {
     $connectionError = 'No se pudo conectar con la base de datos "ferreteria". Revisa que MariaDB esté activo y que los datos de conexión en config.php sean correctos.';
 }
@@ -250,6 +346,7 @@ try {
     <meta name="theme-color" content="#202a28">
     <title>Ventas | Ferretería</title>
     <link rel="stylesheet" href="styles.css">
+    <script src="app.js" defer></script>
 </head>
 <body>
     <header class="topbar">
@@ -307,6 +404,13 @@ try {
                     <strong><span class="status-dot"></span> En línea</strong>
                     <span class="metric-note">Base de datos conectada</span>
                 </article>
+                <article class="metric metric-leader">
+                    <span class="metric-label">EMPLEADO DEL MES</span>
+                    <strong><?= escape($monthlyLeader['nombre'] ?? 'Sin ventas') ?></strong>
+                    <span class="metric-note">
+                        <?= $monthlyLeader ? '$' . number_format((float) $monthlyLeader['total_mes'], 2) . ' en ventas este mes' : 'Aún no hay ventas este mes' ?>
+                    </span>
+                </article>
             </section>
 
             <div class="workspace-grid">
@@ -319,8 +423,10 @@ try {
                         <span class="panel-index">01</span>
                     </div>
 
-                    <?php if (!$products || !$employees): ?>
-                        <p class="empty-state">Agrega productos y empleados a la base de datos para comenzar a registrar ventas.</p>
+                    <?php if (!$employees): ?>
+                        <p class="empty-state">Agrega al menos un empleado para comenzar a registrar ventas.</p>
+                    <?php elseif (!$availableProducts): ?>
+                        <p class="empty-state">No hay productos con existencias disponibles.</p>
                     <?php else: ?>
                         <form method="post" class="sale-form">
                             <input type="hidden" name="csrf_token" value="<?= escape($_SESSION['csrf_token']) ?>">
@@ -333,23 +439,34 @@ try {
                                 <?php endforeach; ?>
                             </select>
 
-                            <label for="id_producto">Producto</label>
-                            <select id="id_producto" name="id_producto" required>
-                                <option value="">Selecciona un producto</option>
-                                <?php foreach ($products as $product): ?>
-                                    <option value="<?= (int) $product['id_producto'] ?>" <?= (int) $product['cantidad'] < 1 ? 'disabled' : '' ?>>
-                                        <?= escape($product['nombre'] ?? 'Sin nombre') ?> · <?= (int) $product['cantidad'] ?> disponibles · $<?= number_format((float) $product['precio'], 2) ?>
-                                    </option>
-                                <?php endforeach; ?>
-                            </select>
-
-                            <div class="quantity-row">
-                                <label for="cantidad">Cantidad</label>
-                                <span>El total se calcula automáticamente</span>
+                            <div class="product-search-wrap">
+                                <label for="producto-busqueda">Buscar producto</label>
+                                <input id="producto-busqueda" type="search" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="product-suggestions" placeholder="Escribe el nombre del producto">
+                                <div id="product-suggestions" class="product-suggestions" role="listbox" hidden></div>
+                                <span id="producto-resultados" class="search-status" role="status" aria-live="polite"></span>
                             </div>
-                            <input id="cantidad" name="cantidad" type="number" min="1" step="1" value="1" inputmode="numeric" required>
 
-                            <button class="submit-button" type="submit">
+                            <div class="cart-add-row">
+                                <div class="cart-quantity-field">
+                                    <label for="cart-quantity">Cantidad</label>
+                                    <input id="cart-quantity" type="number" min="1" step="1" value="1" inputmode="numeric" required>
+                                </div>
+                                <button id="add-cart-item" class="add-cart-button" type="button" disabled>Agregar al carrito <span aria-hidden="true">+</span></button>
+                            </div>
+
+                            <section class="sale-cart" aria-labelledby="cart-title">
+                                <div class="cart-heading">
+                                    <h3 id="cart-title">Productos de la venta</h3>
+                                    <span id="cart-count">0 productos</span>
+                                </div>
+                                <p id="cart-empty" class="cart-empty">Busca y agrega productos para continuar.</p>
+                                <ul id="cart-items" class="cart-items"></ul>
+                                <div class="cart-total"><span>Total estimado</span><strong id="cart-total">$0.00</strong></div>
+                            </section>
+                            <div id="cart-hidden-inputs"></div>
+                            <script type="application/json" id="product-catalog"><?= json_encode($availableProducts, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?></script>
+
+                            <button id="complete-sale" class="submit-button" type="submit" disabled>
                                 <span>Registrar venta</span>
                                 <span class="button-arrow" aria-hidden="true">&#8594;</span>
                             </button>
@@ -374,7 +491,7 @@ try {
                             <table>
                                 <thead>
                                     <tr>
-                                        <th>PRODUCTO</th>
+                                        <th>VENTA</th>
                                         <th>EMPLEADO</th>
                                         <th>FECHA</th>
                                         <th class="align-right">TOTAL</th>
@@ -384,8 +501,10 @@ try {
                                     <?php foreach ($recentSales as $sale): ?>
                                         <tr>
                                             <td>
-                                                <strong><?= escape($sale['producto']) ?></strong>
-                                                <span class="row-subtitle"><?= (int) $sale['cantidad'] ?> <?= (int) $sale['cantidad'] === 1 ? 'unidad' : 'unidades' ?></span>
+                                                <strong>
+                                                    <?= $sale['folio_venta'] ? 'Folio ' . escape(strtoupper(substr($sale['folio_venta'], 0, 8))) : 'Venta #' . (int) $sale['id_venta'] ?>
+                                                </strong>
+                                                <span class="row-subtitle"><?= (int) $sale['lineas'] ?> <?= (int) $sale['lineas'] === 1 ? 'producto' : 'productos' ?>: <?= escape($sale['productos']) ?></span>
                                             </td>
                                             <td><?= escape($sale['empleado']) ?></td>
                                             <td><?= escape(date('d/m/Y', strtotime($sale['fecha_compra']))) ?></td>
@@ -422,6 +541,7 @@ try {
                                             <th>PRECIO</th>
                                             <th>EXISTENCIAS</th>
                                             <th>AJUSTAR STOCK</th>
+                                            <th>ELIMINAR</th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -439,6 +559,17 @@ try {
                                                         <input id="stock-<?= (int) $product['id_producto'] ?>" type="number" name="cantidad" min="1" step="1" value="1" inputmode="numeric" required>
                                                         <button class="stock-button add-stock" type="submit" name="movimiento" value="sumar">+ Sumar</button>
                                                         <button class="stock-button remove-stock" type="submit" name="movimiento" value="restar">− Restar</button>
+                                                    </form>
+                                                </td>
+                                                <td>
+                                                    <form method="post" class="product-delete-form" onsubmit="return confirm('¿Eliminar este producto? Esta acción no se puede deshacer.')">
+                                                        <input type="hidden" name="csrf_token" value="<?= escape($_SESSION['csrf_token']) ?>">
+                                                        <input type="hidden" name="action" value="delete_product">
+                                                        <input type="hidden" name="id_producto" value="<?= (int) $product['id_producto'] ?>">
+                                                        <button class="product-delete-button" type="submit" <?= (int) $product['cantidad_ventas'] > 0 ? 'disabled' : '' ?>>Eliminar</button>
+                                                        <?php if ((int) $product['cantidad_ventas'] > 0): ?>
+                                                            <span class="product-lock-note">Tiene ventas</span>
+                                                        <?php endif; ?>
                                                     </form>
                                                 </td>
                                             </tr>
