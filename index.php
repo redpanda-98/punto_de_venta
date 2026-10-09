@@ -44,13 +44,6 @@ $todaySales = 0.0;
 $todayCount = 0;
 $stockUnits = 0;
 $monthlyLeader = null;
-$salesPageSize = 5;
-$requestedSalesPage = filter_var($_GET['ventas_pagina'] ?? 1, FILTER_VALIDATE_INT);
-$salesPage = max(1, $requestedSalesPage === false ? 1 : $requestedSalesPage);
-$salesPageCount = 1;
-$salesTotalCount = 0;
-$salesFirstItem = 0;
-$salesLastItem = 0;
 
 try {
     $pdo = new PDO(
@@ -163,6 +156,24 @@ try {
                 $productQuery = $pdo->prepare('INSERT INTO productos (nombre, precio, cantidad) VALUES (?, ?, ?)');
                 $productQuery->execute([$name, $price, $quantity]);
                 $message = 'Producto agregado al inventario.';
+            } elseif ($action === 'update_product_price') {
+                $productId = filter_var($_POST['id_producto'] ?? null, FILTER_VALIDATE_INT);
+                $price = $_POST['precio'] ?? '';
+
+                if (!$productId || !is_string($price) || !preg_match('/^\d{1,8}(?:\.\d{1,2})?$/', $price) || (float) $price <= 0) {
+                    throw new DomainException('Escribe un precio mayor que cero con máximo dos decimales.');
+                }
+
+                $pdo->beginTransaction();
+                $productQuery = $pdo->prepare('SELECT id_producto FROM productos WHERE id_producto = ? FOR UPDATE');
+                $productQuery->execute([$productId]);
+                if (!$productQuery->fetch()) {
+                    throw new DomainException('El producto ya no está disponible.');
+                }
+                $updateQuery = $pdo->prepare('UPDATE productos SET precio = ? WHERE id_producto = ?');
+                $updateQuery->execute([$price, $productId]);
+                $pdo->commit();
+                $message = 'Precio del producto actualizado.';
             } elseif ($action === 'adjust_stock') {
                 $productId = filter_var($_POST['id_producto'] ?? null, FILTER_VALIDATE_INT);
                 $quantity = filter_var($_POST['cantidad'] ?? null, FILTER_VALIDATE_INT);
@@ -305,36 +316,18 @@ try {
          ORDER BY e.nombre'
     )->fetchAll();
     $pdo->exec('SET SESSION group_concat_max_len = 8192');
-    $salesTotalCount = (int) $pdo->query(
-        'SELECT COUNT(*) FROM (
-            SELECT COALESCE(folio_venta, CONCAT("legacy-", id_venta)) AS grupo
-            FROM ventas
-            GROUP BY grupo
-        ) AS ventas_agrupadas'
-    )->fetchColumn();
-    $salesPageCount = max(1, (int) ceil($salesTotalCount / $salesPageSize));
-    $salesPage = min($salesPage, $salesPageCount);
-    $salesOffset = ($salesPage - 1) * $salesPageSize;
-    $recentSalesQuery = $pdo->prepare(
+    $recentSales = $pdo->query(
         'SELECT MAX(v.id_venta) AS id_venta, MAX(v.folio_venta) AS folio_venta,
                 v.fecha_compra, e.nombre AS empleado,
-                GROUP_CONCAT(CONCAT(p.nombre, " x", v.cantidad) ORDER BY v.id_venta SEPARATOR ", ") AS productos,
+            GROUP_CONCAT(p.nombre ORDER BY v.id_venta SEPARATOR 0x0A) AS productos,
+            GROUP_CONCAT(v.cantidad ORDER BY v.id_venta SEPARATOR 0x0A) AS cantidades,
                 COUNT(v.id_venta) AS lineas, SUM(v.total) AS total
          FROM ventas v
          INNER JOIN productos p ON p.id_producto = v.id_producto
          INNER JOIN empleados e ON e.id_empleado = v.id_empleado
          GROUP BY COALESCE(v.folio_venta, CONCAT("legacy-", v.id_venta)), v.id_empleado, v.fecha_compra, e.nombre
-         ORDER BY MAX(v.id_venta) DESC
-         LIMIT :page_size OFFSET :page_offset'
-    );
-    $recentSalesQuery->bindValue(':page_size', $salesPageSize, PDO::PARAM_INT);
-    $recentSalesQuery->bindValue(':page_offset', $salesOffset, PDO::PARAM_INT);
-    $recentSalesQuery->execute();
-    $recentSales = $recentSalesQuery->fetchAll();
-    if ($recentSales) {
-        $salesFirstItem = $salesOffset + 1;
-        $salesLastItem = $salesOffset + count($recentSales);
-    }
+            ORDER BY MAX(v.id_venta) DESC'
+        )->fetchAll();
 
     $summary = $pdo->query(
         'SELECT
@@ -368,7 +361,7 @@ try {
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#202a28">
+    <meta name="theme-color" content="#263640">
     <title>Ventas | Ferretería</title>
     <link rel="stylesheet" href="styles.css">
     <script src="app.js" defer></script>
@@ -390,7 +383,18 @@ try {
                 </div>
             </nav>
         <?php endif; ?>
-        <span class="topbar-label"><span class="status-dot"></span> Punto de venta</span>
+        <div class="topbar-tools">
+            <span class="topbar-label"><span class="status-dot"></span> Punto de venta</span>
+            <label class="theme-picker">
+                <span class="visually-hidden">Tema de color</span>
+                <select id="theme-select" aria-label="Tema de color">
+                    <option value="azul-niebla">Azul niebla</option>
+                    <option value="verde-salvia">Verde salvia</option>
+                    <option value="gris-mineral">Gris mineral</option>
+                    <option value="oscuro">Oscuro</option>
+                </select>
+            </label>
+        </div>
     </header>
 
     <main class="page-shell">
@@ -506,7 +510,7 @@ try {
                             <p class="eyebrow">ACTIVIDAD RECIENTE</p>
                             <h2 id="history-title">Últimas ventas</h2>
                         </div>
-                        <span class="panel-index">5 POR PÁGINA</span>
+                        <span class="panel-index"><?= count($recentSales) ?> VENTAS</span>
                     </div>
 
                     <?php if (!$recentSales): ?>
@@ -517,6 +521,8 @@ try {
                                 <thead>
                                     <tr>
                                         <th>VENTA</th>
+                                        <th>PRODUCTOS VENDIDOS</th>
+                                        <th>CANTIDAD</th>
                                         <th>EMPLEADO</th>
                                         <th>FECHA</th>
                                         <th class="align-right">TOTAL</th>
@@ -529,8 +535,9 @@ try {
                                                 <strong>
                                                     <?= $sale['folio_venta'] ? 'Folio ' . escape(strtoupper(substr($sale['folio_venta'], 0, 8))) : 'Venta #' . (int) $sale['id_venta'] ?>
                                                 </strong>
-                                                <span class="row-subtitle"><?= (int) $sale['lineas'] ?> <?= (int) $sale['lineas'] === 1 ? 'producto' : 'productos' ?>: <?= escape($sale['productos']) ?></span>
                                             </td>
+                                            <td class="sales-list-cell"><?= escape($sale['productos']) ?></td>
+                                            <td class="sales-list-cell sales-quantity-cell"><?= escape($sale['cantidades']) ?></td>
                                             <td><?= escape($sale['empleado']) ?></td>
                                             <td><?= escape(date('d/m/Y', strtotime($sale['fecha_compra']))) ?></td>
                                             <td class="align-right amount">$<?= number_format((float) $sale['total'], 2) ?></td>
@@ -540,24 +547,7 @@ try {
                             </table>
                         </div>
                     <?php endif; ?>
-                    <div class="history-footer">
-                        <span>Mostrando <?= $salesFirstItem ?>–<?= $salesLastItem ?> de <?= $salesTotalCount ?> ventas</span>
-                        <?php if ($salesPageCount > 1): ?>
-                            <nav class="sales-pagination" aria-label="Paginación de ventas">
-                                <?php if ($salesPage > 1): ?>
-                                    <a href="?ventas_pagina=<?= $salesPage - 1 ?>#historial" aria-label="Página anterior">Anterior</a>
-                                <?php else: ?>
-                                    <span class="pagination-disabled">Anterior</span>
-                                <?php endif; ?>
-                                <span class="pagination-current">Página <?= $salesPage ?> de <?= $salesPageCount ?></span>
-                                <?php if ($salesPage < $salesPageCount): ?>
-                                    <a href="?ventas_pagina=<?= $salesPage + 1 ?>#historial" aria-label="Página siguiente">Siguiente</a>
-                                <?php else: ?>
-                                    <span class="pagination-disabled">Siguiente</span>
-                                <?php endif; ?>
-                            </nav>
-                        <?php endif; ?>
-                    </div>
+                    <div class="history-footer"><?= count($recentSales) ?> ventas en total</div>
                 </section>
             </div>
 
@@ -590,7 +580,16 @@ try {
                                         <?php foreach ($products as $product): ?>
                                             <tr>
                                                 <td><strong><?= escape($product['nombre'] ?? 'Sin nombre') ?></strong></td>
-                                                <td>$<?= number_format((float) $product['precio'], 2) ?></td>
+                                                <td>
+                                                    <form method="post" class="product-price-form">
+                                                        <input type="hidden" name="csrf_token" value="<?= escape($_SESSION['csrf_token']) ?>">
+                                                        <input type="hidden" name="action" value="update_product_price">
+                                                        <input type="hidden" name="id_producto" value="<?= (int) $product['id_producto'] ?>">
+                                                        <label class="visually-hidden" for="precio-<?= (int) $product['id_producto'] ?>">Precio de <?= escape($product['nombre'] ?? 'producto') ?></label>
+                                                        <div class="product-price-input"><span>$</span><input id="precio-<?= (int) $product['id_producto'] ?>" name="precio" type="number" min="0.01" max="99999999.99" step="0.01" value="<?= number_format((float) $product['precio'], 2, '.', '') ?>" required></div>
+                                                        <button class="price-save-button" type="submit" aria-label="Guardar precio de <?= escape($product['nombre'] ?? 'producto') ?>" title="Guardar precio">Guardar</button>
+                                                    </form>
+                                                </td>
                                                 <td><span class="stock-count"><?= number_format((int) $product['cantidad']) ?></span> unidades</td>
                                                 <td>
                                                     <form method="post" class="stock-form">

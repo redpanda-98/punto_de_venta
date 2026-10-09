@@ -1,3 +1,37 @@
+const themeSelect = document.querySelector('#theme-select');
+const supportedThemes = ['azul-niebla', 'verde-salvia', 'gris-mineral', 'oscuro'];
+const themeStorageKey = 'ferreteria-color-theme';
+
+function applyTheme(theme, persist = false) {
+    const selectedTheme = supportedThemes.includes(theme) ? theme : 'azul-niebla';
+    document.documentElement.dataset.theme = selectedTheme;
+    if (themeSelect) {
+        themeSelect.value = selectedTheme;
+    }
+
+    const themeColor = getComputedStyle(document.documentElement).getPropertyValue('--header-background').trim();
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', themeColor);
+
+    if (persist) {
+        try {
+            localStorage.setItem(themeStorageKey, selectedTheme);
+        } catch (error) {
+            return;
+        }
+    }
+}
+
+if (themeSelect) {
+    let savedTheme = 'azul-niebla';
+    try {
+        savedTheme = localStorage.getItem(themeStorageKey) ?? savedTheme;
+    } catch (error) {
+        savedTheme = 'azul-niebla';
+    }
+    applyTheme(savedTheme);
+    themeSelect.addEventListener('change', () => applyTheme(themeSelect.value, true));
+}
+
 const productCatalogNode = document.querySelector('#product-catalog');
 const productSearch = document.querySelector('#producto-busqueda');
 const productSuggestions = document.querySelector('#product-suggestions');
