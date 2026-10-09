@@ -32,6 +32,9 @@ if (themeSelect) {
     themeSelect.addEventListener('change', () => applyTheme(themeSelect.value, true));
 }
 
+const employeeFilter = document.querySelector('#employee-filter');
+employeeFilter?.addEventListener('change', () => employeeFilter.requestSubmit());
+
 const productCatalogNode = document.querySelector('#product-catalog');
 const productSearch = document.querySelector('#producto-busqueda');
 const productSuggestions = document.querySelector('#product-suggestions');

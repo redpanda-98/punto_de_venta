@@ -15,6 +15,17 @@ function escape(string $value): string
     return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
 }
 
+function chartAmountLabel(float $amount): string
+{
+    if ($amount >= 1000000) {
+        return '$' . number_format($amount / 1000000, 1, '.', '') . ' M';
+    }
+    if ($amount >= 1000) {
+        return '$' . number_format($amount / 1000, 1, '.', '') . ' k';
+    }
+    return '$' . number_format($amount, 0);
+}
+
 function employeeFields(): array
 {
     $name = $_POST['nombre'] ?? '';
@@ -35,6 +46,19 @@ function employeeFields(): array
     return [$name, $phone === '' ? null : $phone];
 }
 
+$pageDefinitions = [
+    'resumen' => ['title' => 'Resumen', 'description' => 'Actividad y ventas del día.'],
+    'ventas' => ['title' => 'Registrar venta', 'description' => 'Busca productos y registra una venta con varios artículos.'],
+    'historial' => ['title' => 'Últimas ventas', 'description' => 'Consulta tickets, productos y cantidades vendidos.'],
+    'inventario' => ['title' => 'Inventario', 'description' => 'Administra productos, precios y existencias.'],
+    'empleados' => ['title' => 'Empleados', 'description' => 'Consulta y administra los datos de empleados.'],
+];
+$currentPage = $_GET['pagina'] ?? 'resumen';
+if (!is_string($currentPage) || !isset($pageDefinitions[$currentPage])) {
+    $currentPage = 'resumen';
+}
+$currentPageInfo = $pageDefinitions[$currentPage];
+
 $connectionError = null;
 $products = [];
 $availableProducts = [];
@@ -44,6 +68,11 @@ $todaySales = 0.0;
 $todayCount = 0;
 $stockUnits = 0;
 $monthlyLeader = null;
+$chartMonths = [];
+$storeMonthlySales = [];
+$employeeMonthlySales = [];
+$storeChartMax = 0.0;
+$employeeChartMax = 0.0;
 $salesPageSize = 10;
 $requestedSalesPage = filter_var($_GET['ventas_pagina'] ?? 1, FILTER_VALIDATE_INT);
 $salesPage = max(1, $requestedSalesPage === false ? 1 : $requestedSalesPage);
@@ -68,7 +97,7 @@ try {
         $postedToken = $_POST['csrf_token'] ?? '';
         if (!is_string($postedToken) || !hash_equals($_SESSION['csrf_token'], $postedToken)) {
             $_SESSION['flash'] = ['type' => 'error', 'message' => 'La sesión expiró. Actualiza la página e inténtalo de nuevo.'];
-            header('Location: index.php');
+            header('Location: index.php?pagina=' . rawurlencode($currentPage));
             exit;
         }
 
@@ -291,7 +320,7 @@ try {
             $_SESSION['flash'] = ['type' => 'error', 'message' => 'No se pudo guardar el cambio. Verifica los datos e inténtalo de nuevo.'];
         }
 
-        header('Location: index.php');
+        header('Location: index.php?pagina=' . rawurlencode($currentPage));
         exit;
     }
 
@@ -365,7 +394,7 @@ try {
     $todayCount = (int) $summary['cantidad_ventas'];
     $stockUnits = (int) $pdo->query('SELECT COALESCE(SUM(cantidad), 0) FROM productos')->fetchColumn();
     $monthlyLeader = $pdo->query(
-        "SELECT e.nombre, COALESCE(SUM(v.total), 0) AS total_mes
+        "SELECT e.id_empleado, e.nombre, COALESCE(SUM(v.total), 0) AS total_mes
          FROM empleados e
          LEFT JOIN ventas v ON v.id_empleado = e.id_empleado
             AND v.fecha_compra >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
@@ -376,6 +405,73 @@ try {
     )->fetch();
     if (!$monthlyLeader || (float) $monthlyLeader['total_mes'] <= 0) {
         $monthlyLeader = null;
+    }
+
+    $monthNames = [
+        '01' => 'Ene', '02' => 'Feb', '03' => 'Mar', '04' => 'Abr',
+        '05' => 'May', '06' => 'Jun', '07' => 'Jul', '08' => 'Ago',
+        '09' => 'Sep', '10' => 'Oct', '11' => 'Nov', '12' => 'Dic',
+    ];
+    $chartCurrentMonth = new DateTimeImmutable('first day of this month');
+    for ($monthOffset = 5; $monthOffset >= 0; $monthOffset--) {
+        $monthDate = $chartCurrentMonth->modify('-' . $monthOffset . ' months');
+        $monthKey = $monthDate->format('Y-m');
+        $chartMonths[] = [
+            'key' => $monthKey,
+            'label' => $monthNames[$monthDate->format('m')],
+        ];
+        $storeMonthlySales[$monthKey] = 0.0;
+    }
+
+    $chartStartDate = $chartMonths[0]['key'] . '-01';
+    $chartEndDate = $chartCurrentMonth->modify('+1 month')->format('Y-m-d');
+    $storeSalesQuery = $pdo->prepare(
+        'SELECT DATE_FORMAT(fecha_compra, "%Y-%m") AS mes, SUM(total) AS total_mes
+         FROM ventas
+         WHERE fecha_compra >= ? AND fecha_compra < ?
+         GROUP BY mes
+         ORDER BY mes'
+    );
+    $storeSalesQuery->execute([$chartStartDate, $chartEndDate]);
+    foreach ($storeSalesQuery->fetchAll() as $monthSales) {
+        if (array_key_exists($monthSales['mes'], $storeMonthlySales)) {
+            $storeMonthlySales[$monthSales['mes']] = (float) $monthSales['total_mes'];
+        }
+    }
+    $storeChartMax = max(array_values($storeMonthlySales));
+
+    foreach ($employees as $employee) {
+        $employeeId = (int) $employee['id_empleado'];
+        $employeeMonthlySales[$employeeId] = [
+            'nombre' => (string) ($employee['nombre'] ?? 'Sin nombre'),
+            'ventas' => array_fill_keys(array_keys($storeMonthlySales), 0.0),
+        ];
+    }
+    $employeeSalesQuery = $pdo->prepare(
+        'SELECT v.id_empleado, DATE_FORMAT(v.fecha_compra, "%Y-%m") AS mes, SUM(v.total) AS total_mes
+         FROM ventas v
+         WHERE v.fecha_compra >= ? AND v.fecha_compra < ?
+         GROUP BY v.id_empleado, mes
+         ORDER BY v.id_empleado, mes'
+    );
+    $employeeSalesQuery->execute([$chartStartDate, $chartEndDate]);
+    foreach ($employeeSalesQuery->fetchAll() as $employeeMonth) {
+        $employeeId = (int) $employeeMonth['id_empleado'];
+        if (isset($employeeMonthlySales[$employeeId]['ventas'][$employeeMonth['mes']])) {
+            $employeeMonthlySales[$employeeId]['ventas'][$employeeMonth['mes']] = (float) $employeeMonth['total_mes'];
+        }
+    }
+    $defaultChartEmployeeId = $monthlyLeader
+        ? (int) $monthlyLeader['id_empleado']
+        : (int) (array_key_first($employeeMonthlySales) ?? 0);
+    $requestedChartEmployeeId = filter_var($_GET['empleado'] ?? $defaultChartEmployeeId, FILTER_VALIDATE_INT);
+    $selectedChartEmployeeId = $requestedChartEmployeeId !== false
+        && isset($employeeMonthlySales[$requestedChartEmployeeId])
+        ? $requestedChartEmployeeId
+        : $defaultChartEmployeeId;
+    $selectedEmployeeChart = $employeeMonthlySales[$selectedChartEmployeeId] ?? null;
+    if ($selectedEmployeeChart) {
+        $employeeChartMax = max(array_values($selectedEmployeeChart['ventas']));
     }
 } catch (Throwable $exception) {
     $connectionError = 'No se pudo conectar con la base de datos "ferreteria". Revisa que MariaDB esté activo y que los datos de conexión en config.php sean correctos.';
@@ -388,24 +484,24 @@ try {
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#263640">
-    <title>Ventas | Ferretería</title>
+    <title><?= escape($currentPageInfo['title']) ?> | Ferretería</title>
     <link rel="stylesheet" href="styles.css">
     <script src="app.js" defer></script>
 </head>
 <body>
     <header class="topbar">
-        <a class="brand" href="index.php" aria-label="Ferretería, inicio">
+        <a class="brand" href="?pagina=resumen" aria-label="Ferretería, inicio">
             <span class="brand-mark" aria-hidden="true">F</span>
             <span class="brand-name">Ferretería</span>
         </a>
         <?php if (!$connectionError): ?>
             <nav class="site-nav" aria-label="Secciones de la página">
                 <div class="site-nav-inner">
-                    <a href="#resumen">Resumen</a>
-                    <a href="#venta">Registrar venta</a>
-                    <a href="#historial">Últimas ventas</a>
-                    <a href="#inventario">Inventario</a>
-                    <a href="#empleados">Empleados</a>
+                    <a href="?pagina=resumen" <?= $currentPage === 'resumen' ? 'aria-current="page"' : '' ?>>Resumen</a>
+                    <a href="?pagina=ventas" <?= $currentPage === 'ventas' ? 'aria-current="page"' : '' ?>>Registrar venta</a>
+                    <a href="?pagina=historial" <?= $currentPage === 'historial' ? 'aria-current="page"' : '' ?>>Últimas ventas</a>
+                    <a href="?pagina=inventario" <?= $currentPage === 'inventario' ? 'aria-current="page"' : '' ?>>Inventario</a>
+                    <a href="?pagina=empleados" <?= $currentPage === 'empleados' ? 'aria-current="page"' : '' ?>>Empleados</a>
                 </div>
             </nav>
         <?php endif; ?>
@@ -427,8 +523,8 @@ try {
         <section class="page-heading" aria-labelledby="page-title">
             <div>
                 <p class="eyebrow">OPERACIÓN DIARIA <span></span> <?= escape(date('d / m / Y')) ?></p>
-                <h1 id="page-title">Ventas e inventario</h1>
-                <p class="heading-copy">Registra ventas y administra las existencias de tu ferretería.</p>
+                <h1 id="page-title"><?= escape($currentPageInfo['title']) ?></h1>
+                <p class="heading-copy"><?= escape($currentPageInfo['description']) ?></p>
             </div>
             <div class="heading-stamp" aria-hidden="true">
                 <span>F</span>
@@ -443,6 +539,7 @@ try {
         <?php endif; ?>
 
         <?php if (!$connectionError): ?>
+            <?php if ($currentPage === 'resumen'): ?>
             <section class="metrics" id="resumen" aria-label="Resumen del día">
                 <article class="metric metric-accent">
                     <span class="metric-label">VENTAS DE HOY</span>
@@ -467,8 +564,115 @@ try {
                     </span>
                 </article>
             </section>
+            <section class="summary-charts" aria-label="Gráficas mensuales de ventas">
+                <article class="chart-panel" aria-labelledby="store-chart-title">
+                    <div class="chart-heading">
+                        <div>
+                            <p class="eyebrow">ÚLTIMOS SEIS MESES</p>
+                            <h2 id="store-chart-title">Ventas generales</h2>
+                        </div>
+                    </div>
+                    <p class="chart-description">Total vendido por la tienda, agrupado por mes.</p>
+                    <?php
+                        $chartBaseY = 196;
+                        $chartPlotHeight = 142;
+                        $chartLeft = 58;
+                        $chartSlotWidth = 88;
+                        $storeBarWidth = 38;
+                        $storeScale = max(1, $storeChartMax);
+                    ?>
+                    <svg class="monthly-chart" viewBox="0 0 620 242" role="img" aria-labelledby="store-chart-title store-chart-description">
+                        <desc id="store-chart-description">Ventas totales de la tienda durante los últimos seis meses.</desc>
+                        <?php for ($gridIndex = 0; $gridIndex <= 4; $gridIndex++): ?>
+                            <?php $gridY = $chartBaseY - ($chartPlotHeight * $gridIndex / 4); ?>
+                            <?php $gridValue = $storeChartMax * $gridIndex / 4; ?>
+                            <line class="chart-grid-line" x1="54" y1="<?= $gridY ?>" x2="608" y2="<?= $gridY ?>"></line>
+                            <text class="chart-axis-label" x="48" y="<?= $gridY + 4 ?>" text-anchor="end"><?= escape(chartAmountLabel($gridValue)) ?></text>
+                        <?php endfor; ?>
+                        <?php foreach ($chartMonths as $monthIndex => $month): ?>
+                            <?php
+                                $monthSales = $storeMonthlySales[$month['key']];
+                                $barHeight = $monthSales > 0 ? $monthSales / $storeScale * $chartPlotHeight : 0;
+                                $barX = $chartLeft + ($monthIndex * $chartSlotWidth) + (($chartSlotWidth - $storeBarWidth) / 2);
+                                $barY = $chartBaseY - $barHeight;
+                            ?>
+                            <g>
+                                <rect class="store-sales-bar" x="<?= $barX ?>" y="<?= $barY ?>" width="<?= $storeBarWidth ?>" height="<?= $barHeight ?>" rx="2">
+                                    <title><?= escape($month['label'] . ': ' . number_format($monthSales, 2)) ?></title>
+                                </rect>
+                                <text class="chart-value-label" x="<?= $barX + ($storeBarWidth / 2) ?>" y="<?= max(20, $barY - 8) ?>" text-anchor="middle"><?= escape(chartAmountLabel($monthSales)) ?></text>
+                                <text class="chart-month-label" x="<?= $barX + ($storeBarWidth / 2) ?>" y="224" text-anchor="middle"><?= escape($month['label']) ?></text>
+                            </g>
+                        <?php endforeach; ?>
+                    </svg>
+                </article>
 
-            <div class="workspace-grid">
+                <article class="chart-panel" aria-labelledby="employee-chart-title">
+                    <div class="chart-heading">
+                        <div>
+                            <p class="eyebrow">VENTAS DEL MES</p>
+                            <h2 id="employee-chart-title">Ventas por empleado</h2>
+                        </div>
+                        <form class="chart-month-filter" id="employee-filter" method="get">
+                            <input type="hidden" name="pagina" value="resumen">
+                            <label for="employee-chart-employee">Empleado</label>
+                            <select id="employee-chart-employee" name="empleado">
+                                <?php foreach ($employeeMonthlySales as $employeeId => $employee): ?>
+                                    <option value="<?= (int) $employeeId ?>" <?= (int) $selectedChartEmployeeId === (int) $employeeId ? 'selected' : '' ?>><?= escape($employee['nombre']) ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </form>
+                    </div>
+                    <p class="chart-description">
+                        <?= $selectedEmployeeChart ? 'Ventas de ' . escape($selectedEmployeeChart['nombre']) . ' por mes.' : 'Ventas mensuales por empleado.' ?>
+                    </p>
+                    <?php if (!$selectedEmployeeChart): ?>
+                        <p class="empty-state">Agrega empleados y ventas para ver la comparativa mensual.</p>
+                    <?php else: ?>
+                        <?php
+                            $employeeScale = max(1, $employeeChartMax);
+                            $employeePlotLeft = 82;
+                            $employeePlotWidth = 518;
+                            $employeeBaseY = 190;
+                            $employeePlotHeight = 136;
+                            $employeeLinePoints = [];
+                            foreach ($chartMonths as $monthIndex => $month) {
+                                $employeeX = $employeePlotLeft + ($monthIndex * $employeePlotWidth / max(1, count($chartMonths) - 1));
+                                $employeeY = $employeeBaseY - ($selectedEmployeeChart['ventas'][$month['key']] / $employeeScale * $employeePlotHeight);
+                                $employeeLinePoints[] = number_format($employeeX, 2, '.', '') . ',' . number_format($employeeY, 2, '.', '');
+                            }
+                        ?>
+                        <svg class="monthly-chart" viewBox="0 0 620 242" role="img" aria-labelledby="employee-chart-title employee-chart-description">
+                            <desc id="employee-chart-description">Ventas mensuales de <?= escape($selectedEmployeeChart['nombre']) ?> durante los últimos seis meses.</desc>
+                            <?php for ($gridIndex = 0; $gridIndex <= 4; $gridIndex++): ?>
+                                <?php $gridY = $employeeBaseY - ($employeePlotHeight * $gridIndex / 4); ?>
+                                <?php $gridValue = $employeeChartMax * $gridIndex / 4; ?>
+                                <line class="chart-grid-line" x1="54" y1="<?= $gridY ?>" x2="608" y2="<?= $gridY ?>"></line>
+                                <text class="chart-axis-label" x="48" y="<?= $gridY + 4 ?>" text-anchor="end"><?= escape(chartAmountLabel($gridValue)) ?></text>
+                            <?php endfor; ?>
+                            <polyline class="employee-sales-line" points="<?= escape(implode(' ', $employeeLinePoints)) ?>"></polyline>
+                            <?php foreach ($chartMonths as $monthIndex => $month): ?>
+                                <?php
+                                    $employeeSales = $selectedEmployeeChart['ventas'][$month['key']];
+                                    $employeeX = $employeePlotLeft + ($monthIndex * $employeePlotWidth / max(1, count($chartMonths) - 1));
+                                    $employeeY = $employeeBaseY - ($employeeSales / $employeeScale * $employeePlotHeight);
+                                ?>
+                                <g>
+                                    <circle class="employee-sales-point" cx="<?= $employeeX ?>" cy="<?= $employeeY ?>" r="5">
+                                        <title><?= escape($selectedEmployeeChart['nombre'] . ', ' . $month['label'] . ' ' . substr($month['key'], 0, 4) . ': ' . number_format($employeeSales, 2)) ?></title>
+                                    </circle>
+                                    <text class="chart-month-label" x="<?= $employeeX ?>" y="224" text-anchor="middle"><?= escape($month['label']) ?></text>
+                                </g>
+                            <?php endforeach; ?>
+                        </svg>
+                    <?php endif; ?>
+                </article>
+            </section>
+            <?php endif; ?>
+
+            <?php if (in_array($currentPage, ['ventas', 'historial'], true)): ?>
+            <div class="workspace-grid single-section-grid">
+                <?php if ($currentPage === 'ventas'): ?>
                 <section class="sale-panel" id="venta" aria-labelledby="sale-title">
                     <div class="section-heading">
                         <div>
@@ -529,7 +733,9 @@ try {
                     <?php endif; ?>
                     <div class="panel-footnote"><span class="status-dot"></span> La existencia se descuenta al confirmar.</div>
                 </section>
+                <?php endif; ?>
 
+                <?php if ($currentPage === 'historial'): ?>
                 <section class="history-panel" id="historial" aria-labelledby="history-title">
                     <div class="section-heading history-heading">
                         <div>
@@ -559,7 +765,13 @@ try {
                                         <tr>
                                             <td>
                                                 <strong>
-                                                    <?= $sale['folio_venta'] ? 'Folio ' . escape(strtoupper(substr($sale['folio_venta'], 0, 8))) : 'Venta #' . (int) $sale['id_venta'] ?>
+                                                    <?php if ($sale['folio_venta'] && str_starts_with($sale['folio_venta'], 'DEMO2026')): ?>
+                                                        <?= 'DEMO ' . escape(substr($sale['folio_venta'], 4, 4) . '/' . substr($sale['folio_venta'], 8, 2) . ' · E' . substr($sale['folio_venta'], 13, 2)) ?>
+                                                    <?php elseif ($sale['folio_venta']): ?>
+                                                        <?= 'Folio ' . escape(strtoupper(substr($sale['folio_venta'], 0, 8))) ?>
+                                                    <?php else: ?>
+                                                        <?= 'Venta #' . (int) $sale['id_venta'] ?>
+                                                    <?php endif; ?>
                                                 </strong>
                                             </td>
                                             <td class="sales-list-cell"><?= escape($sale['productos']) ?></td>
@@ -578,13 +790,13 @@ try {
                         <?php if ($salesPageCount > 1): ?>
                             <nav class="sales-pagination" aria-label="Paginación de ventas">
                                 <?php if ($salesPage > 1): ?>
-                                    <a href="?ventas_pagina=<?= $salesPage - 1 ?>#historial" aria-label="Página anterior">Anterior</a>
+                                    <a href="?pagina=historial&amp;ventas_pagina=<?= $salesPage - 1 ?>#historial" aria-label="Página anterior">Anterior</a>
                                 <?php else: ?>
                                     <span class="pagination-disabled">Anterior</span>
                                 <?php endif; ?>
                                 <span class="pagination-current">Página <?= $salesPage ?> de <?= $salesPageCount ?></span>
                                 <?php if ($salesPage < $salesPageCount): ?>
-                                    <a href="?ventas_pagina=<?= $salesPage + 1 ?>#historial" aria-label="Página siguiente">Siguiente</a>
+                                    <a href="?pagina=historial&amp;ventas_pagina=<?= $salesPage + 1 ?>#historial" aria-label="Página siguiente">Siguiente</a>
                                 <?php else: ?>
                                     <span class="pagination-disabled">Siguiente</span>
                                 <?php endif; ?>
@@ -592,8 +804,11 @@ try {
                         <?php endif; ?>
                     </div>
                 </section>
+                <?php endif; ?>
             </div>
+            <?php endif; ?>
 
+            <?php if ($currentPage === 'inventario'): ?>
             <section class="inventory-section" id="inventario" aria-labelledby="inventory-title">
                 <div class="inventory-heading">
                     <div>
@@ -690,7 +905,9 @@ try {
                     </section>
                 </div>
             </section>
+            <?php endif; ?>
 
+            <?php if ($currentPage === 'empleados'): ?>
             <section class="employee-section" id="empleados" aria-labelledby="employee-title">
                 <div class="inventory-heading">
                     <div>
@@ -780,6 +997,7 @@ try {
                     </section>
                 </div>
             </section>
+            <?php endif; ?>
         <?php endif; ?>
     </main>
 
